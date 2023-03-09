@@ -1,19 +1,27 @@
-﻿#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <winsock2.h> // Include the Winsock library
+#include <winsock2.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
+#include "messages.h"
+#include "Ws2tcpip.h"
+#include "auth.h"
+#include "Packet.h"
 
-#pragma comment(lib, "ws2_32.lib") // Link with the Winsock library
+#pragma comment(lib, "ws2_32.lib")
 
 #define BUFFER_SIZE 1024
 #define PORT 12345
-#define AUTH_KEY "my_secret_key"
+#define SERVER_IP "127.0.0.1"
+
+
 
 int main()
 {
-    WSADATA wsa;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsa);
+    WSADATA wsaData;
+    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (result != 0) {
         printf("WSAStartup failed: %d\n", result);
         return 1;
@@ -28,7 +36,10 @@ int main()
 
     struct sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
-    serverAddress.sin_addr.s_addr = inet_addr("127.0.0.1"); // Change to the server's IP address
+    if (inet_pton(AF_INET, SERVER_IP, &serverAddress.sin_addr) <= 0) {
+        perror("Invalid address/ Address not supported");
+        exit(EXIT_FAILURE);
+    }
     serverAddress.sin_port = htons(PORT);
 
     result = connect(connectSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress));
@@ -41,53 +52,10 @@ int main()
 
     printf("Connected to server on port %d.\n", PORT);
 
-    char authBuffer[BUFFER_SIZE];
-    snprintf(authBuffer, BUFFER_SIZE, "%s", AUTH_KEY);
-    int authSize = strlen(authBuffer) + 1;
-
-    result = send(connectSocket, (char*)&authSize, sizeof(int), 0);
-    if (result == SOCKET_ERROR) {
-        printf("send failed: %d\n", WSAGetLastError());
+    // Authenticate with the server
+    if (auth::authWithServer(connectSocket, "mySecretKey") != 0) {
+        printf("Authentication failed.\n");
         closesocket(connectSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    result = send(connectSocket, authBuffer, authSize, 0);
-    if (result == SOCKET_ERROR) {
-        printf("send failed: %d\n", WSAGetLastError());
-        closesocket(connectSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    char buffer[BUFFER_SIZE];
-    int bytesReceived;
-
-    int packetSize;
-    bytesReceived = recv(connectSocket, (char*)&packetSize, sizeof(int), 0);
-    if (bytesReceived == SOCKET_ERROR) {
-        printf("recv failed: %d\n", WSAGetLastError());
-        closesocket(connectSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    if (bytesReceived == 0) {
-        printf("Server disconnected.\n");
-        closesocket(connectSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    char* packet = (char*)malloc(packetSize);
-    memset(packet, 0, packetSize);
-
-    bytesReceived = recv(connectSocket, packet, packetSize, 0);
-    if (bytesReceived == SOCKET_ERROR) {
-        printf("recv failed: %d\n", WSAGetLastError());
-        closesocket(connectSocket);
-        free(packet);
         WSACleanup();
         return 1;
     }
@@ -95,45 +63,44 @@ int main()
     char messageBuffer[BUFFER_SIZE];
     printf("Enter a message to send to the server: ");
     fgets(messageBuffer, BUFFER_SIZE, stdin);
-    char combinedBuffer[BUFFER_SIZE];
-    //snprintf(authBuffer, BUFFER_SIZE, "%s", AUTH_KEY);
-    snprintf(authBuffer, BUFFER_SIZE, "%s%s", messageBuffer, AUTH_KEY);
-    int combinedSize = strlen(combinedBuffer) + 1;
 
-    result = send(connectSocket, (char*)&combinedSize, sizeof(int), 0);
-
-    
-    if (result == SOCKET_ERROR) {
-        printf("send failed: %d\n", WSAGetLastError());
+    // Send the message to the server
+    if (auth::sendToServer(connectSocket, messageBuffer) == SOCKET_ERROR) {
+        printf("Failed to send message to server.\n");
         closesocket(connectSocket);
         WSACleanup();
         return 1;
     }
 
-    result = send(connectSocket, combinedBuffer, combinedSize, 0);
-    if (result == SOCKET_ERROR) {
-        printf("send failed: %d\n", WSAGetLastError());
+    // Receive the response from the server
+    char* response = nullptr;
+    int responseLen = 0;
+    bool success = auth::receiveFromServer(connectSocket);
+
+    if (!success) {
+        printf("Failed to receive response from server.\n");
         closesocket(connectSocket);
         WSACleanup();
         return 1;
     }
 
-    // Receive the packet data
-    bytesReceived = recv(connectSocket, packet, packetSize, 0);
-    if (bytesReceived == SOCKET_ERROR) {
-        printf("recv failed: %d\n", WSAGetLastError());
+    responseLen = Packet::receivePacketSize(connectSocket);
+    response = new char[responseLen];
+    if (!Packet::receiveAll(connectSocket, response, responseLen)) {
+        printf("Failed to receive response from server.\n");
+        delete[] response;
         closesocket(connectSocket);
-        free(packet);
         WSACleanup();
         return 1;
     }
 
     // Print the response from the server
-    printf("Server response: %s\n", packet);
+    printf("Server response: %s\n", response);
 
     // Clean up
-    free(packet);
+    free(response);
     closesocket(connectSocket);
     WSACleanup();
+
     return 0;
 }
